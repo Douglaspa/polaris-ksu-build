@@ -1,0 +1,69 @@
+name: Next 3.4.0 legacy manual hooks polaris
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git zip unzip libelf-dev libssl-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+      - name: Source and toolchain
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git clang
+          git clone --depth=1 -b lineage-22.2 https://github.com/LineageOS/android_kernel_xiaomi_sdm845.git kernel
+          cd kernel
+          git fetch --depth=1 origin aa8adfe9bf212c6e93238a86980b4024da4f819a
+          git checkout aa8adfe9bf212c6e93238a86980b4024da4f819a
+          git clone --depth=1 -b v3.4.0-legacy https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
+          test "$(git -C KernelSU-Next rev-parse HEAD)" = 8af3d4fec33be32fa5d3f8dae4f380fac45bf2cd
+          ln -s ../KernelSU-Next/kernel drivers/kernelsu
+          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          python3 ../patches/polaris-next-legacy.py .
+          git diff --stat
+          git diff > ../manual-hooks.diff
+      - name: Configuration
+        run: |
+          set -euo pipefail
+          cd kernel
+          make O=out ARCH=arm64 vendor/xiaomi/mi845_defconfig
+          cat arch/arm64/configs/vendor/xiaomi/polaris.config >> out/.config
+          scripts/config --file out/.config -e KSU -e KSU_MANUAL_HOOK -d KSU_KPROBES_HOOK -d KSU_SYSCALL_TABLE_HOOK -e KPROBES -e KALLSYMS -e KALLSYMS_ALL -e EXT4_FS -e OVERLAY_FS
+          make O=out ARCH=arm64 olddefconfig
+          grep -qx CONFIG_KSU=y out/.config
+          grep -qx CONFIG_KSU_MANUAL_HOOK=y out/.config
+          ! grep -qx CONFIG_KSU_SYSCALL_TABLE_HOOK=y out/.config
+          ! grep -qx CONFIG_KSU_KPROBES_HOOK=y out/.config
+      - name: Compile
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          cd kernel
+          make O=out ARCH=arm64 -j4 CC=clang CC_ARM32=arm-linux-gnueabi-gcc CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 2>&1 | tee ../build.log
+          test -s out/arch/arm64/boot/Image.gz-dtb
+          for symbol in kernelsu_init ksu_handle_sys_reboot ksu_handle_execveat ksu_handle_vfs_read ksu_handle_faccessat; do
+            grep -Eq "[[:space:]]${symbol}$" out/System.map || exit 1
+          done
+      - name: Collect diagnostic artifacts
+        if: always()
+        run: |
+          mkdir -p output
+          cp build.log output/ 2>/dev/null || true
+          cp manual-hooks.diff output/ 2>/dev/null || true
+          cp kernel/out/.config output/kernel.config 2>/dev/null || true
+          cp kernel/out/System.map output/ 2>/dev/null || true
+          if [ -s kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz-dtb output/
+            sha256sum output/Image.gz-dtb > output/SHA256SUMS
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Next-legacy-polaris-diagnostics
+          path: output/
+          retention-days: 14
