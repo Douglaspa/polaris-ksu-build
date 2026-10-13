@@ -31,6 +31,11 @@ jobs:
           bash /tmp/ksu-setup.sh v3.3.1
           test -e drivers/kernelsu/Kconfig
           test "$(git -C KernelSU describe --tags --exact-match)" = v3.3.1
+      - name: Add Linux 4.9 compatibility shim
+        run: |
+          set -euo pipefail
+          cd kernel
+          sed -i '/^#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)/i #ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif' drivers/kernelsu/core/init.c
       - name: Configure and verify built-in KSU
         run: |
           set -euo pipefail
