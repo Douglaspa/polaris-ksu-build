@@ -55,7 +55,7 @@ jobs:
           set -euo pipefail
           cd kernel
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
-          make O=out ARCH=arm64 -j4 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          make O=out ARCH=arm64 -j4 CC=clang CC_ARM32=arm-linux-gnueabi-gcc CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
           test -s out/arch/arm64/boot/Image.gz-dtb
           test -s out/System.map
           grep -Eq '[[:space:]]kernelsu_init$' out/System.map || { echo 'FATAL: no kernelsu_init symbol in built kernel'; exit 1; }
