@@ -1,0 +1,105 @@
+name: Build KernelSU 0.9.5 for LineageOS 22.2 polaris
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git zip unzip libelf-dev libssl-dev libncurses-dev ccache gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+      - name: Install Android 4.9 kernel Clang toolchain
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git clang
+          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
+      - name: Checkout exact LineageOS kernel source
+        run: |
+          set -euo pipefail
+          git clone -b lineage-22.2 --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_sdm845.git kernel
+          cd kernel
+          test "$(git rev-parse HEAD)" = aa8adfe9bf212c6e93238a86980b4024da4f819a || { echo 'ROM kernel source changed; refusing to build a mismatched image'; exit 1; }
+      - name: Integrate pinned upstream KernelSU 0.9.5
+        run: |
+          set -euo pipefail
+          cd kernel
+          curl -fsSL https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh -o /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh v0.9.5
+          test -e drivers/kernelsu/Kconfig
+          test "$(git -C KernelSU describe --tags --exact-match)" = v0.9.5
+      - name: Configure and verify built-in KSU (not module)
+        run: |
+          set -euo pipefail
+          cd kernel
+          make O=out ARCH=arm64 vendor/xiaomi/mi845_defconfig
+          cat arch/arm64/configs/vendor/xiaomi/polaris.config >> out/.config
+          cat >> out/.config <<'CONFIG'
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KSU=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG
+          make O=out ARCH=arm64 olddefconfig
+          for flag in CONFIG_KPROBES=y CONFIG_KSU=y CONFIG_OVERLAY_FS=y CONFIG_KALLSYMS=y; do
+            grep -qx "$flag" out/.config || { echo "FATAL: missing $flag"; exit 1; }
+          done
+          echo 'Verified: KSU built-in and kprobes enabled.'
+      - name: Compile kernel (fail on ANY compiler error)
+        run: |
+          set -euo pipefail
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          make O=out ARCH=arm64 -j4 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          test -s out/arch/arm64/boot/Image.gz-dtb
+          test -s out/System.map
+          grep -Eq '[[:space:]]kernelsu_init$' out/System.map || { echo 'FATAL: no kernelsu_init symbol in built kernel'; exit 1; }
+          grep -Eq '[[:space:]]ksu_handle_execveat$' out/System.map || { echo 'FATAL: missing KSU exec hook'; exit 1; }
+      - name: Package polaris-only AnyKernel3 archive
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cat > AnyKernel3/anykernel.sh <<'AK3'
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=KernelSU 0.9.5 LineageOS 22.2 polaris
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=polaris
+          supported.versions=15
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+          boot_attributes() {
+            set_perm_recursive 0 0 755 644 $RAMDISK/*;
+            set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          }
+          BLOCK=boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          AK3
+          cd AnyKernel3
+          zip -qr "$GITHUB_WORKSPACE/KernelSU-0.9.5-polaris-los22.2.zip" . -x '.git/*' 'README.md'
+          unzip -t "$GITHUB_WORKSPACE/KernelSU-0.9.5-polaris-los22.2.zip" | tail -1
+          sha256sum "$GITHUB_WORKSPACE/KernelSU-0.9.5-polaris-los22.2.zip" > "$GITHUB_WORKSPACE/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KSU-0.9.5-polaris-los22.2
+          path: |
+            KernelSU-0.9.5-polaris-los22.2.zip
+            SHA256SUMS
+            build.log
+          retention-days: 14
