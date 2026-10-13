@@ -1,0 +1,86 @@
+name: Build KernelSU Next 3.4.1 for LineageOS 22.2 polaris
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git zip unzip libelf-dev libssl-dev libncurses-dev ccache gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+      - name: Install Android 4.9 kernel Clang toolchain
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git clang
+          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
+      - name: Checkout exact LineageOS kernel source
+        run: |
+          set -euo pipefail
+          git clone -b lineage-22.2 --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_sdm845.git kernel
+          cd kernel
+          test "$(git rev-parse HEAD)" = aa8adfe9bf212c6e93238a86980b4024da4f819a || exit 1
+      - name: Integrate pinned KernelSU Next 3.4.1
+        run: |
+          set -euo pipefail
+          cd kernel
+          curl -fsSL https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v3.4.1/kernel/setup.sh -o /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh v3.4.1
+          test -e drivers/kernelsu/Kconfig
+          test "$(git -C KernelSU-Next describe --tags --exact-match)" = v3.4.1
+      - name: Add Linux 4.9 compatibility shims
+        run: |
+          set -euo pipefail
+          cd kernel
+          sed -i '/^#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)/i #ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif' drivers/kernelsu/core/init.c
+          sed -i '/^#include <asm\/syscall.h>/a #if defined(__aarch64__) && !defined(syscall_fn_t)\ntypedef void (*syscall_fn_t)(void);\n#endif' drivers/kernelsu/hook/syscall_hook.h
+      - name: Configure and verify built-in KSU Next
+        run: |
+          set -euo pipefail
+          cd kernel
+          make O=out ARCH=arm64 vendor/xiaomi/mi845_defconfig
+          cat arch/arm64/configs/vendor/xiaomi/polaris.config >> out/.config
+          cat >> out/.config <<'CONFIG'
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KSU=y
+          CONFIG_EXT4_FS=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG
+          make O=out ARCH=arm64 olddefconfig
+          for flag in CONFIG_KPROBES=y CONFIG_KSU=y CONFIG_EXT4_FS=y CONFIG_OVERLAY_FS=y CONFIG_KALLSYMS=y; do grep -qx "$flag" out/.config || exit 1; done
+      - name: Compile kernel
+        run: |
+          set -euo pipefail
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          make O=out ARCH=arm64 -j4 CC=clang CC_ARM32=arm-linux-gnueabi-gcc CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          test -s out/arch/arm64/boot/Image.gz-dtb
+          test -s out/System.map
+          grep -Eq '[[:space:]]kernelsu_init$' out/System.map
+          grep -Eq '[[:space:]]ksu_ksud_init$' out/System.map
+      - name: Package AnyKernel3
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          sed -i 's/device.name1=.*/device.name1=polaris/' AnyKernel3/anykernel.sh
+          sed -i 's@BLOCK=.*@BLOCK=boot;@' AnyKernel3/anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=0;/' AnyKernel3/anykernel.sh
+          cd AnyKernel3
+          zip -qr "$GITHUB_WORKSPACE/KernelSU-Next-3.4.1-polaris.zip" . -x '.git/*' 'README.md'
+          unzip -t "$GITHUB_WORKSPACE/KernelSU-Next-3.4.1-polaris.zip" | tail -1
+          sha256sum "$GITHUB_WORKSPACE/KernelSU-Next-3.4.1-polaris.zip" > "$GITHUB_WORKSPACE/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KSU-Next-3.4.1-polaris
+          path: |
+            KernelSU-Next-3.4.1-polaris.zip
+            SHA256SUMS
+            build.log
+          retention-days: 14
